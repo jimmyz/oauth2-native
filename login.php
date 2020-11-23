@@ -1,4 +1,7 @@
 <?php
+// This script is adapted from the excellent tutorial provided by Aaron Parecki (Okta)
+// https://developer.okta.com/blog/2018/07/16/oauth-2-command-line
+
 $client_id = 'a023Z00000bVNbgQAG';
 $auth_path = 'https://identint.familysearch.org/cis-web/oauth2/v3/authorization';
 $token_path = 'https://identint.familysearch.org/cis-web/oauth2/v3/token';
@@ -6,12 +9,17 @@ $token_path = 'https://identint.familysearch.org/cis-web/oauth2/v3/token';
 $ip = '127.0.0.1';
 $port = '52321';
 
-$redirect_uri = 'http://'.$ip.':'.$port.'/familysearch-auth';
-echo "Make sure you have registered redirect URI: ".$redirect_uri."\n";
+// Set the Redirect URI. This will need to be registered with FamilySearch
+$redirect_uri = 'http://'.$ip.':'.$port;
+echo "Make sure you have registered Redirect URI: ".$redirect_uri."\n";
+
+// This is the string that will be used to open up a socket to listen on the specified port
 $socket_str = 'tcp://'.$ip.':'.$port;
+
+// This will be used later in the OAuth protocol as a security mechanism
 $state = bin2hex(random_bytes(5));
 
-
+// The following are functions used to create the Code Challenge and Verifier for PKCE
 function encode_string($bytes) {
   $vstring = base64_encode($bytes);
   $vstring = str_replace("+","-",$vstring);
@@ -25,17 +33,18 @@ function create_verifier() {
 }
 
 function create_challenge($v) {
-  // hash function should return raw bytes
   return encode_string(hash("sha256",$v,true));
 }
 
-
+// Create the Code Challenge and Verifier for PKCE
 $verifier = create_verifier();
 $challenge = create_challenge($verifier);
 
 echo "Verifier: ".$verifier."\n";
 echo "Challenge: ".$challenge."\n";
 
+// Create the Authorization URL. 
+// This is the URL to be used in the user's browser for authenticating and granting consent.
 $authorize_url = $auth_path.'?'.http_build_query([
   'client_id' => $client_id,
   'redirect_uri' => $redirect_uri,
@@ -48,9 +57,11 @@ $authorize_url = $auth_path.'?'.http_build_query([
 
 echo "Open the following URL in a browser to continue\n";
 echo $authorize_url."\n";
+// Attempt to launch the browser with the Authorize URL location.
+// This is verified to work on Mac. Unsure about Windows or Linux.
 shell_exec("open '".$authorize_url."'");
 
-
+// The following function handles the listening on the loopback address for the redirect.
 function startHttpServer($socketStr) {
     // Adapted from http://cweiske.de/shpub.htm
   
@@ -62,7 +73,7 @@ function startHttpServer($socketStr) {
       . "Content-Type: text/plain\r\n"
       . "\r\n"
       . "Bad Request\r\n";
-  
+
     ini_set('default_socket_timeout', 60 * 5);
   
     $server = stream_socket_server($socketStr, $errno, $errstr);
@@ -80,65 +91,60 @@ function startHttpServer($socketStr) {
         exit(1);
       }
       $headers = [];
-      $body    = null;
-      $content_length = 0;
-      //read request headers
+
+      // Capture the HTTP request. 
+      // Each header is delimited by newline. 
+      // Headers end with the empty string.
       while(false !== ($line = trim(fgets($sock)))) {
-        echo $line."\n";
         if('' === $line) {
-          echo "End of headers detected.\n";
+          // End of headers has been reached. Break from listening
           break;
-        }
-        $regex = '#^Content-Length:\s*([[:digit:]]+)\s*$#i';
-        if(preg_match($regex, $line, $matches)) {
-          $content_length = (int)$matches[1];
         }
         $headers[] = $line;
       }
-      // Debugging, print all of the headers
+      // Debug print all of the request headers.
       echo "\$headers[] :\n";
       print_r($headers);
 
-      // read content/body
-      if($content_length > 0) {
-        $body = fread($sock, $content_length);
-      } else {
-        echo "No content body.\n";
-      }
-      // send response
+      // Break up first line of HTTP request into the method, URL, and version
+      // $header[0] contains the first line of HTTP request. This part is all that is needed.
+      // Example: GET /?code=-35-8469...&state=1c8cca364c HTTP/1.1
+      // Each part is separated by a space character
       list($method, $url, $httpver) = explode(' ', $headers[0]);
       if($method == 'GET') {
-        #echo "Redirected to $url\n";
         $parts = parse_url($url);
-        #print_r($parts);
-        if(isset($parts['path']) && $parts['path'] == '/familysearch-auth'
-          && isset($parts['query'])
-        ) {
+        if(isset($parts['query'])) {
           parse_str($parts['query'], $query);
           if(isset($query['code']) && isset($query['state'])) {
+            // Send success response to the browser
             fwrite($sock, $responseOk);
             fclose($sock);
             return $query;
           }
         }
       }
+      // Send error response to browser if above checks failed
       fwrite($sock, $responseErr);
       fclose($sock);
     } while (true);
   }
 
 // Start the mini HTTP server and wait for their browser to hit the redirect URL
-// Store the query string parameters in a variable
-$auth = startHttpServer($socket_str);
+// Return the query string parameters in the $auth variable
+$auth = startHttpServer($socket_str); // tcp://127.0.0.1:23424
 
+// Check to make sure state returned matches the state we passed on the Authorization URL
 if($auth['state'] != $state) {
   echo "Wrong 'state' parameter returned\n";
   exit(2);
 }
 
+// Get the auth code to be exchanged for tokens
 $code = $auth['code'];
 echo "Auth code is: ".$code."\n";
 
+// This function executes an HTTP request to the token endpoint. 
+// Returns an associative array containing tokens or error.
 function token_request($url, $params) {
   $curl = curl_init();
   $request_body = http_build_query($params);
